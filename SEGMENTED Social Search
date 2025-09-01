@@ -1,0 +1,328 @@
+SEGMENT: SHEETS+HEADERS
+
+    // === NEW: Social lookup (first blank Social Media) ===
+function DONORS_socialLookupActive_(){
+  SS_Config.assertSheets_(); SS_Config.assertCleanHeaders_(); SS_Config.requireApiKey_();
+  var sh = SpreadsheetApp.getActive().getSheetByName(SS_Config.SHEET_2);
+
+
+SEGMENT: SHEETS+HEADERS
+
+  // header map (lowercase)
+  var hdr = sh.getRange(1,1,1,SS_Config.HEADERS_CLEAN.length).getValues()[0], hm={};
+  for (var c=0;c<hdr.length;c++){ var k=String(hdr[c]||'').trim().toLowerCase(); if(k) hm[k]=c+1; }
+
+
+SEGMENT: SHEETS+HEADERS
+
+  var colSocial  = hm['linkedin/facebook'] || 9; // I=9 fallback
+  var colCompany = hm['company'] || 7;           // G=7 fallback (kept correct)
+
+
+SEGMENT: ROW_SELECTION
+
+  // find first row with blank Social Media
+  var last = sh.getLastRow(), r = 0;
+  for (var i=2;i<=last;i++){ if (!String(sh.getRange(i,colSocial).getDisplayValue()).trim()){ r=i; break; } }
+
+
+SEGMENT: UI_FEEDBACK
+
+  if (!r) { SpreadsheetApp.getActive().toast('No blank Social Media cells found.'); return; }
+  sh.setActiveSelection(sh.getRange(r,1));
+
+
+SEGMENT: TOKENIZATION
+
+  // inputs: prefer explicit First/Last; else derive from Donor name (BB Normalized)
+  var first = hm['first name'] ? sh.getRange(r, hm['first name']).getDisplayValue().trim() : '';
+  var lastN = hm['last name']  ? sh.getRange(r, hm['last name']).getDisplayValue().trim()  : '';
+  if (!first || !lastN){
+    var dn = hm['donor name (bb normalized)'] ? sh.getRange(r, hm['donor name (bb normalized)']).getDisplayValue() : '';
+    var parts = String(dn||'').replace(/\s*\([^)]*\)\s*/g,'').trim(); // drop spouse in ()
+    if (parts.indexOf(',')>-1){ // "Last, First"
+      var a=parts.split(','); lastN=a[0].trim()||lastN; first=a[1]?a[1].trim():first;
+    } else {
+      var t=parts.split(/\s+/); if (!first && t[0]) first=t[0]; if (!lastN && t.length>1) lastN=t[t.length-1];
+    }
+  }
+
+
+SEGMENT: SHEETS+HEADERS
+
+  var email   = hm['email'] ? sh.getRange(r, hm['email']).getDisplayValue().trim() : '';
+  var phone   = hm['phone'] ? sh.getRange(r, hm['phone']).getDisplayValue().trim() : '';
+  var company = sh.getRange(r, colCompany).getDisplayValue().trim();
+
+
+SEGMENT: CONFIG+CONSTANTS
+
+  var key = SS_Config.requireApiKey_(), endpoint = SS_Config.API_ENDPOINT, model = SS_Config.MODEL;
+
+
+SEGMENT: PROMPT_BUILDER
+
+    var inputObj = {
+    first_name: first || "",
+    last_name:  lastN || "",
+    email:      email || "",
+    phone:      phone || "",
+    company:    company || "",
+    region_hint: "Illinois"
+  };
+
+
+SEGMENT: PROMPT_BUILDER
+
+  var prompt =
+    'HEADER:\n' +
+    '{\n' +
+    '  "title": "Special Spaces Donor Social Lookup — Research",\n' +
+    '  "description": "Identify LinkedIn and Facebook profiles for each donor and return links with confidence ratings.",\n' +
+    '  "timestamp": "2025-08-31T20:46:53-05:00",\n' +
+    '  "timezone": "America/Chicago",\n' +
+    '  "version": "v1.0-research"\n' +
+    '}\n' +
+    '\n' +
+    'INPUTS:\n' +
+    '{\n' +
+    '  "donor_name": ' + JSON.stringify(hm['donor name (bb normalized)'] ? sh.getRange(r, hm['donor name (bb normalized)']).getDisplayValue() : (first && lastN ? (first + " " + lastN) : null)) + ',\n' +
+    '  "email": ' + JSON.stringify(email || null) + ',\n' +
+    '  "phone": ' + JSON.stringify(phone || null) + ',\n' +
+    '  "location_state": "Illinois"\n' +
+    '}\n' +
+    '\n' +
+    'TASK BLOCK:\n' +
+    '{ "task_type": "people", "output_mode": "object", "detail_level": "minimal" }\n' +
+    '\n' +
+
+
+SEGMENT: TOKENIZATION
+
+    'TOKENS:\n' +
+    '{ "derive": ["first","last","mi","first_initial","email_local_tokens"], "rules": "Split donor_name; if two tokens, first=token1,last=token2; build first_initial; from email local part, split on . _ - to form tokens." }\n' +
+    '\n' +
+
+
+SEGMENT: SEARCH_STRATEGY
+
+    'SEARCH STRATEGY BLOCK:\n' +
+    '{\n' +
+    '  "query_family": "exact",\n' +
+    '  "site_restriction": {\n' +
+    '    "linkedin": ["site:linkedin.com/in", "site:linkedin.com/pub"],\n' +
+    '    "facebook": ["site:facebook.com/people", "site:facebook.com/profile.php", "site:facebook.com"]\n' +
+    '  },\n' +
+    '  "negative_terms": {\n' +
+    '    "linkedin": ["-jobs","-job","-hiring","-recruiter","-careers","-learning","-salary"],\n' +
+    '    "facebook": ["-pages","-groups","-events","-marketplace","-gaming","-watch","-help","-login","-photos","-videos"]\n' +
+    '  },\n' +
+    '  "alias_variants": ["{first} {last}","{first} {mi} {last}","{first_initial} {last}","{last} {first}","{email_local_tokens}","{first} {last} Illinois","{first} {last} IL"],\n' +
+    '  "date_range": "anytime"\n' +
+    '}\n' +
+    '\n' +
+
+
+SEGMENT: ACCEPTANCE_CRITERIA
+
+    'ACCEPTANCE CRITERIA:\n' +
+    '{\n' +
+    '  "accept_criteria": "Always return one profile per platform. Viable = allowed personal path where the name token appears in the title or URL. If none, choose the top plausible person-profile and treat as low confidence. Nulls disallowed.",\n' +
+    '  "reject_criteria": ["login/help pages","company/org pages","jobs/hiring listings","groups/events/marketplace/gaming/pages","search results pages","obvious mismatch: different first+last tokens"],\n' +
+    '  "tie_break_order": ["Exact full name in title/URL","Name + Illinois/IL clue","Name + employer-domain clue from email","Vanity URL over numeric ID"],\n' +
+    '  "corroboration_required": "none in research mode"\n' +
+    '}\n' +
+    '\n' +
+
+
+SEGMENT: OTHER
+
+    'OUTPUT CONTRACT:\n' +
+  'Comply with the JSON schema in API request (fields: full_name, linkedin_url, facebook_url, confidence; optional notes, candidates, debug). No extra prose.';
+
+
+SEGMENT: LOGGING
+
+  // DEBUG: log exact inputs and prompt sent to model
+  Logger.log('[DONORS][SOCIAL] inputObj: %s', JSON.stringify(inputObj));
+  Logger.log('[DONORS][SOCIAL] to-model[0]: %s', 'Inputs (use for search context only): ' + JSON.stringify(inputObj));
+  Logger.log('[DONORS][SOCIAL] to-model[1]: %s\n----- END PROMPT -----', prompt);
+
+
+SEGMENT: OPENAI_REQUEST
+
+    var resp = UrlFetchApp.fetch(endpoint, {
+    method: 'post',
+    muteHttpExceptions: true,
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + key },
+    payload: JSON.stringify({
+      model: model,
+      temperature: 0,
+      top_p: 1,
+      max_output_tokens: 600,
+
+      tools: [{ type: 'web_search' }],
+
+
+SEGMENT: SCHEMA
+
+            text: { // moved from response_format → text.format
+        format: {
+          type: 'json_schema',
+          name: 'SocialProfiles',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              full_name: { type: 'string' },
+              linkedin_url: { type: ['string','null'] },
+              facebook_url: { type: ['string','null'] },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+              notes: { type: ['string','null'] },
+              candidates: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                      properties: {
+                      network: { type: 'string', enum: ['linkedin','facebook'] },
+                      url: { type: 'string' },
+                      match_tokens: { type: 'array', items: { type: 'string' } },
+                      reason: { type: 'string' }
+                    },
+                    required: ['network','url','match_tokens','reason']
+
+                }
+              },
+                debug: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  queries_run: { type: 'array', items: { type: 'string' } },
+                  results_sample: { type: 'array', items: { type: 'string' } }
+                },
+                required: ['queries_run','results_sample']
+              }
+
+            },
+                required: ['full_name','linkedin_url','facebook_url','confidence','notes','candidates','debug']
+
+          }
+        }
+      },
+
+
+SEGMENT: SEARCH_STRATEGY
+
+instructions: `Goal: emit a SocialProfiles JSON object that conforms to the schema (strict).
+
+Assume default location_state = Illinois. Use Q1→Q3 search strategy from prompt to find personal profile URLs.
+
+EMIT EXACTLY ONE JSON OBJECT. FIELDS:
+- full_name (string): resolved display name for the selected person.
+- linkedin_url (string|null): HTTPS, host = linkedin.com, path /in or /pub only. Canonicalize. If not confidently disambiguated, use null.
+- facebook_url (string|null): HTTPS, host = facebook.com, personal profile paths only (people/, profile.php, or canonical vanity). If not confidently disambiguated, use null.
+- confidence (number 0..1): calibrated confidence for the selected URLs.
+Optional:
+- notes (string): short rationale.
+- candidates (array): up to 5 objects {network:'linkedin'|'facebook', url:string, match_tokens:string[], reason:string}.
+- debug (object, only if mode=debug): include queries_run:string[] and results_sample:string[].
+
+Constraints:
+- No extra fields. No prose before/after JSON.
+- Prefer IL signals; down-rank non-IL unless employer/email-domain matches.
+- Reject company/jobs/groups/events/help/search pages.
+- Tie-break: exact full name > IL clue > employer/domain clue > vanity slug > numeric ID.`,
+
+
+
+SEGMENT: OPENAI_REQUEST
+
+      input: [{ role:'user', content:[
+        { type:'input_text', text:'INPUTS: ' + JSON.stringify(inputObj) },
+        { type:'input_text', text: prompt }
+      ]}],
+
+      metadata: { task:'social_lookup', version:'v1.2', timezone:'America/Chicago' }
+    }),
+    followRedirects: true
+  });
+
+
+SEGMENT: RESPONSE_PARSING
+
+  var code = resp.getResponseCode();
+  var bodyText = resp.getContentText();
+
+
+SEGMENT: LOGGING
+
+  Logger.log('[DONORS][SOCIAL] HTTP %s', code);
+  Logger.log('[DONORS][SOCIAL] bodyText sample: %s', (bodyText||'').substring(0,400));
+
+
+SEGMENT: RESPONSE_PARSING
+
+  if (code < 200 || code >= 400) throw new Error('OpenAI HTTP ' + code + ': ' + bodyText);
+
+  var body = ENH_safeParseJson_(bodyText) || {};
+  var msg = (body.output || []).find(function(i){ return i && i.type === 'message'; });
+  var outTextItem = msg && Array.isArray(msg.content)
+    ? msg.content.find(function(c){ return c && (c.type === 'output_text' || c.type === 'text'); })
+    : null;
+  var outText = (outTextItem && typeof outTextItem.text === 'string')
+    ? outTextItem.text
+    : (typeof body.output_text === 'string' ? body.output_text : '');
+
+
+SEGMENT: RESPONSE_PARSING
+
+  // Prefer schema JSON; fallback to URL scraping
+  var parsed = ENH_safeParseJson_(outText);
+  var li = parsed && typeof parsed === 'object' ? (parsed.linkedin || parsed.linkedin_url || null) : null;
+  var fb = parsed && typeof parsed === 'object' ? (parsed.facebook || parsed.facebook_url || null) : null;
+
+  if (!(li && fb)){
+    var candidates = (String(outText||'').match(/https?:\/\/[^\s\]\)>'"]+/gi) || []).map(function(u){
+      try{ return new URL(u).toString(); }catch(_){ return null; }
+    }).filter(Boolean);
+
+    function isLinkedIn(u){ try{ var x=new URL(u); return /(^|\.)linkedin\.com$/i.test(x.hostname) && /^\/(in|pub)\//i.test(x.pathname); }catch(_){ return false; } }
+    function isFacebook(u){ try{ var x=new URL(u); if(!/(^|\.)facebook\.com$/i.test(x.hostname)) return false;
+      if (/^\/search\//i.test(x.pathname)) return false;
+      return /^\/(people\/|profile\.php|[A-Za-z0-9.\-_]{3,})/i.test(x.pathname);
+    }catch(_){ return false; } }
+
+    li = li || candidates.find(isLinkedIn) || null;
+    fb = fb || candidates.find(isFacebook) || null;
+  }
+
+
+SEGMENT: RESPONSE_PARSING
+
+  var outObj = { linkedin: li || null, facebook: fb || null };
+
+
+SEGMENT: LOGGING
+
+  Logger.log('[DONORS][SOCIAL] extracted -> ' + JSON.stringify(outObj));
+
+
+SEGMENT: WRITE_BACK
+
+  sh.getRange(r, colSocial).setValue(JSON.stringify(outObj));
+
+
+SEGMENT: UI_FEEDBACK
+
+  SpreadsheetApp.getActive().toast('Social Lookup: row ' + r);
+}
+
+
+SEGMENT: UTILITIES
+
+
+
+function ENH_safeParseJson_(s){ try{ return JSON.parse(s);}catch(e){ return null; }
