@@ -3,6 +3,7 @@ SEGMENT: SHEETS+HEADERS
     // === NEW: Social lookup (first blank Social Media) ===
 function DONORS_socialLookupActive_(){
   SS_Config.assertSheets_(); SS_Config.assertCleanHeaders_(); SS_Config.requireApiKey_();
+  // @@VAR SHEET_NAME_SOURCE: Active sheet name constant
   var sh = SpreadsheetApp.getActive().getSheetByName(SS_Config.SHEET_2);
 
 
@@ -15,7 +16,11 @@ SEGMENT: SHEETS+HEADERS
 
 SEGMENT: SHEETS+HEADERS
 
+  // @@VAR HEADER_SOCIAL_KEY: Header key for social column
+  // @@VAR FALLBACK_SOCIAL_COL: Fallback column index for social (9)
   var colSocial  = hm['linkedin/facebook'] || 9; // I=9 fallback
+  // @@VAR HEADER_COMPANY_KEY: Header key for company column
+  // @@VAR FALLBACK_COMPANY_COL: Fallback column index for company (7)
   var colCompany = hm['company'] || 7;           // G=7 fallback (kept correct)
 
 
@@ -34,10 +39,12 @@ SEGMENT: UI_FEEDBACK
 
 SEGMENT: TOKENIZATION
 
-  // inputs: prefer explicit First/Last; else derive from Donor name (BB Normalized)
+  // @@VAR HEADER_FIRST_NAME_KEY: Header key for first name
   var first = hm['first name'] ? sh.getRange(r, hm['first name']).getDisplayValue().trim() : '';
+  // @@VAR HEADER_LAST_NAME_KEY: Header key for last name
   var lastN = hm['last name']  ? sh.getRange(r, hm['last name']).getDisplayValue().trim()  : '';
   if (!first || !lastN){
+    // @@VAR HEADER_DONOR_NAME_KEY: Header key for normalized donor name
     var dn = hm['donor name (bb normalized)'] ? sh.getRange(r, hm['donor name (bb normalized)']).getDisplayValue() : '';
     var parts = String(dn||'').replace(/\s*\([^)]*\)\s*/g,'').trim(); // drop spouse in ()
     if (parts.indexOf(',')>-1){ // "Last, First"
@@ -50,13 +57,17 @@ SEGMENT: TOKENIZATION
 
 SEGMENT: SHEETS+HEADERS
 
+  // @@VAR HEADER_EMAIL_KEY: Header key for email
   var email   = hm['email'] ? sh.getRange(r, hm['email']).getDisplayValue().trim() : '';
+  // @@VAR HEADER_PHONE_KEY: Header key for phone
   var phone   = hm['phone'] ? sh.getRange(r, hm['phone']).getDisplayValue().trim() : '';
   var company = sh.getRange(r, colCompany).getDisplayValue().trim();
 
 
 SEGMENT: CONFIG+CONSTANTS
 
+  // @@VAR API_ENDPOINT: OpenAI API endpoint
+  // @@VAR MODEL_NAME: Default model identifier
   var key = SS_Config.requireApiKey_(), endpoint = SS_Config.API_ENDPOINT, model = SS_Config.MODEL;
 
 
@@ -68,6 +79,7 @@ SEGMENT: PROMPT_BUILDER
     email:      email || "",
     phone:      phone || "",
     company:    company || "",
+    // @@VAR REGION_HINT_STATE: Region hint for search
     region_hint: "Illinois"
   };
 
@@ -77,22 +89,30 @@ SEGMENT: PROMPT_BUILDER
   var prompt =
     'HEADER:\n' +
     '{\n' +
+    // @@VAR PROMPT_TITLE: Prompt title
     '  "title": "Special Spaces Donor Social Lookup — Research",\n' +
+    // @@VAR PROMPT_DESCRIPTION: Prompt description
     '  "description": "Identify LinkedIn and Facebook profiles for each donor and return links with confidence ratings.",\n' +
+    // @@VAR PROMPT_TIMESTAMP: Static or generated timestamp
     '  "timestamp": "2025-08-31T20:46:53-05:00",\n' +
+    // @@VAR PROMPT_TIMEZONE: Prompt timezone
     '  "timezone": "America/Chicago",\n' +
+    // @@VAR PROMPT_VERSION: Prompt version label
     '  "version": "v1.0-research"\n' +
     '}\n' +
     '\n' +
     'INPUTS:\n' +
     '{\n' +
+    // @@VAR HEADER_DONOR_NAME_KEY: Header key reference within prompt
     '  "donor_name": ' + JSON.stringify(hm['donor name (bb normalized)'] ? sh.getRange(r, hm['donor name (bb normalized)']).getDisplayValue() : (first && lastN ? (first + " " + lastN) : null)) + ',\n' +
     '  "email": ' + JSON.stringify(email || null) + ',\n' +
     '  "phone": ' + JSON.stringify(phone || null) + ',\n' +
+    // @@VAR LOCATION_STATE: State filter for search
     '  "location_state": "Illinois"\n' +
     '}\n' +
     '\n' +
     'TASK BLOCK:\n' +
+    // @@VAR TASK_BLOCK_PARAMS: Task type and output detail level
     '{ "task_type": "people", "output_mode": "object", "detail_level": "minimal" }\n' +
     '\n' +
 
@@ -100,6 +120,7 @@ SEGMENT: PROMPT_BUILDER
 SEGMENT: TOKENIZATION
 
     'TOKENS:\n' +
+    // @@VAR NAME_TOKEN_RULES: Name and email tokenization rules
     '{ "derive": ["first","last","mi","first_initial","email_local_tokens"], "rules": "Split donor_name; if two tokens, first=token1,last=token2; build first_initial; from email local part, split on . _ - to form tokens." }\n' +
     '\n' +
 
@@ -108,16 +129,23 @@ SEGMENT: SEARCH_STRATEGY
 
     'SEARCH STRATEGY BLOCK:\n' +
     '{\n' +
+    // @@VAR QUERY_FAMILY: Search query family
     '  "query_family": "exact",\n' +
     '  "site_restriction": {\n' +
+    // @@VAR LINKEDIN_SITE_RESTRICTIONS: Allowed LinkedIn paths for search
     '    "linkedin": ["site:linkedin.com/in", "site:linkedin.com/pub"],\n' +
+    // @@VAR FACEBOOK_SITE_RESTRICTIONS: Allowed Facebook paths for search
     '    "facebook": ["site:facebook.com/people", "site:facebook.com/profile.php", "site:facebook.com"]\n' +
     '  },\n' +
     '  "negative_terms": {\n' +
+    // @@VAR LINKEDIN_NEGATIVE_TERMS: LinkedIn noise filters
     '    "linkedin": ["-jobs","-job","-hiring","-recruiter","-careers","-learning","-salary"],\n' +
+    // @@VAR FACEBOOK_NEGATIVE_TERMS: Facebook noise filters
     '    "facebook": ["-pages","-groups","-events","-marketplace","-gaming","-watch","-help","-login","-photos","-videos"]\n' +
     '  },\n' +
+    // @@VAR ALIAS_VARIANTS: Query alias templates and state hints
     '  "alias_variants": ["{first} {last}","{first} {mi} {last}","{first_initial} {last}","{last} {first}","{email_local_tokens}","{first} {last} Illinois","{first} {last} IL"],\n' +
+    // @@VAR DATE_RANGE: Search recency window
     '  "date_range": "anytime"\n' +
     '}\n' +
     '\n' +
@@ -126,10 +154,14 @@ SEGMENT: SEARCH_STRATEGY
 SEGMENT: ACCEPTANCE_CRITERIA
 
     'ACCEPTANCE CRITERIA:\n' +
+    // @@VAR ACCEPT_CRITERIA_TEXT: Acceptance rule summary
     '{\n' +
     '  "accept_criteria": "Always return one profile per platform. Viable = allowed personal path where the name token appears in the title or URL. If none, choose the top plausible person-profile and treat as low confidence. Nulls disallowed.",\n' +
+    // @@VAR REJECT_CRITERIA_LIST: Rejection filters
     '  "reject_criteria": ["login/help pages","company/org pages","jobs/hiring listings","groups/events/marketplace/gaming/pages","search results pages","obvious mismatch: different first+last tokens"],\n' +
+    // @@VAR TIE_BREAK_ORDER: Tie-break priority
     '  "tie_break_order": ["Exact full name in title/URL","Name + Illinois/IL clue","Name + employer-domain clue from email","Vanity URL over numeric ID"],\n' +
+    // @@VAR CORROBORATION_REQUIRED: Corroboration policy
     '  "corroboration_required": "none in research mode"\n' +
     '}\n' +
     '\n' +
@@ -157,11 +189,16 @@ SEGMENT: OPENAI_REQUEST
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + key },
     payload: JSON.stringify({
+      // @@VAR OPENAI_MODEL_REF: Model variable to use
       model: model,
+      // @@VAR TEMPERATURE: Sampling temperature
       temperature: 0,
+      // @@VAR TOP_P: Nucleus sampling
       top_p: 1,
+      // @@VAR MAX_OUTPUT_TOKENS: Output token cap
       max_output_tokens: 600,
 
+      // @@VAR TOOLS_LIST: Tools to enable for model
       tools: [{ type: 'web_search' }],
 
 
@@ -216,6 +253,7 @@ SEGMENT: SCHEMA
 
 SEGMENT: SEARCH_STRATEGY
 
+// @@VAR INSTRUCTIONS_BLOCK: System instructions and constraints for search and output
 instructions: `Goal: emit a SocialProfiles JSON object that conforms to the schema (strict).
 
 Assume default location_state = Illinois. Use Q1→Q3 search strategy from prompt to find personal profile URLs.
@@ -245,6 +283,9 @@ SEGMENT: OPENAI_REQUEST
         { type:'input_text', text: prompt }
       ]}],
 
+      // @@VAR METADATA_TASK: Metadata task label
+      // @@VAR METADATA_VERSION: Metadata version tag
+      // @@VAR METADATA_TIMEZONE: Metadata timezone value
       metadata: { task:'social_lookup', version:'v1.2', timezone:'America/Chicago' }
     }),
     followRedirects: true
@@ -289,7 +330,9 @@ SEGMENT: RESPONSE_PARSING
       try{ return new URL(u).toString(); }catch(_){ return null; }
     }).filter(Boolean);
 
+    // @@VAR DOMAIN_LINKEDIN_ALLOWED: Domain and path rules for LinkedIn detection
     function isLinkedIn(u){ try{ var x=new URL(u); return /(^|\.)linkedin\.com$/i.test(x.hostname) && /^\/(in|pub)\//i.test(x.pathname); }catch(_){ return false; } }
+    // @@VAR DOMAIN_FACEBOOK_ALLOWED: Domain and path rules for Facebook detection
     function isFacebook(u){ try{ var x=new URL(u); if(!/(^|\.)facebook\.com$/i.test(x.hostname)) return false;
       if (/^\/search\//i.test(x.pathname)) return false;
       return /^\/(people\/|profile\.php|[A-Za-z0-9.\-_]{3,})/i.test(x.pathname);
@@ -312,6 +355,7 @@ SEGMENT: LOGGING
 
 SEGMENT: WRITE_BACK
 
+  // @@VAR WRITE_TARGET_COL_SOCIAL: Target sheet column for social JSON
   sh.getRange(r, colSocial).setValue(JSON.stringify(outObj));
 
 
@@ -325,4 +369,27 @@ SEGMENT: UTILITIES
 
 
 
-function ENH_safeParseJson_(s){ try{ return JSON.parse(s);}catch(e){ return null; }
+function ENH_safeParseJson_(s){ try{ return JSON.parse(s);}catch(e){ return null; } 
+
+TAG FORMAT
+- Insert a standalone line immediately ABOVE the line to customize:
+  // @@VAR <NAME>: <short intent>
+- Use UPPER_SNAKE_CASE for <NAME>. Be concise on intent.
+- If unsure, use OTHER_<N>: <guess>
+
+WHAT TO TAG (client-specific or tunable only)
+- Sheet names and header keys used in lookups or writes (e.g., 'spouse', 'spouse company', 'email', 'phone', 'donor name (bb normalized)').
+- Column numbers when hardcoded fallbacks exist (note the number; do not change it).
+- Prompt literals: title, description, version, timezone, any location hints (e.g., "Illinois"), state codes, retry budgets, stop thresholds, negative filters, site restrictions, tie-break rules.
+- Model, endpoint, temperature, top_p, max_output_tokens, tools list.
+- Social domains or platform tokens (e.g., linkedin.com, facebook.com).
+
+DO NOT TAG
+- Keys and structure of json_schema, strict flags, property names, parsing logic, function names, helper names.
+
+OUTPUT
+- Return ONLY the code with inserted // @@VAR … lines. No extra text. Use ```javascript fences.
+
+FALLBACK
+- If nothing is taggable, return the code unchanged.
+
